@@ -9,30 +9,38 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, Column, String, Text
+from sqlalchemy import create_engine, Column, String, Text, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 ORIGIN = os.getenv("ORIGIN")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agent.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 missing = [name for name, value in {
     "BEARER_TOKEN": BEARER_TOKEN,
     "BASE_URL": BASE_URL,
     "ORIGIN": ORIGIN,
+    "DATABASE_URL": DATABASE_URL,
 }.items() if not value]
 
 if missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
 app = FastAPI(title="A2A Invoice Agent")
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    pool_pre_ping=True,
+    poolclass=NullPool
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -191,15 +199,15 @@ def make_task_envelope(
 
 def fake_ai_decide_package(package: Dict[str, Any]) -> Dict[str, Any]:
     package_id = package.get("packageId", str(uuid.uuid4()))
-    text = canonical_json(package).lower()
+    text_blob = canonical_json(package).lower()
 
-    if "duplicate" in text or "already paid" in text:
+    if "duplicate" in text_blob or "already paid" in text_blob:
         action = "reject_duplicate"
-    elif "approval" in text or "above limit" in text or "outside authority" in text:
+    elif "approval" in text_blob or "above limit" in text_blob or "outside authority" in text_blob:
         action = "request_approval"
-    elif "hold" in text or "verify" in text or "verification pending" in text:
+    elif "hold" in text_blob or "verify" in text_blob or "verification pending" in text_blob:
         action = "hold_invoice"
-    elif "conflict" in text or "mismatch" in text or "exception" in text:
+    elif "conflict" in text_blob or "mismatch" in text_blob or "exception" in text_blob:
         action = "open_exception"
     else:
         action = "settle_invoice"
@@ -232,17 +240,23 @@ def get_task_or_404(db: Session, principal: str, task_id: str) -> TaskRecord:
         TaskRecord.id == task_id,
         TaskRecord.principal == principal
     ).first()
+
     if not row:
         raise HTTPException(
             status_code=404,
             detail={"code": "TASK_NOT_FOUND", "message": "Task not found"}
         )
+
     return row
 
 
 @app.get("/healthz")
-def healthz():
-    return {"ok": True}
+def healthz(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"ok": True, "db": "connected"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"ok": False, "db": "unavailable"})
 
 
 @app.get("/.well-known/agent-card.json")
