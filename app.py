@@ -9,16 +9,24 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 load_dotenv()
 
-BEARER_TOKEN = os.getenv("BEARER_TOKEN", "dev-secret-token")
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000/a2a")
-ORIGIN = os.getenv("ORIGIN", "http://127.0.0.1:8000")
+BEARER_TOKEN = os.getenv("BEARER_TOKEN")
+BASE_URL = os.getenv("BASE_URL")
+ORIGIN = os.getenv("ORIGIN")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./agent.db")
+
+missing = [name for name, value in {
+    "BEARER_TOKEN": BEARER_TOKEN,
+    "BASE_URL": BASE_URL,
+    "ORIGIN": ORIGIN,
+}.items() if not value]
+
+if missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 app = FastAPI(title="A2A Invoice Agent")
 
@@ -33,6 +41,7 @@ task_lock = threading.Lock()
 
 class TaskRecord(Base):
     __tablename__ = "tasks"
+
     id = Column(String, primary_key=True)
     principal = Column(String, nullable=False, index=True)
     context_id = Column(String, nullable=False)
@@ -41,7 +50,6 @@ class TaskRecord(Base):
     task_json = Column(Text, nullable=False)
     message_id = Column(String, nullable=False, index=True)
     message_hash = Column(String, nullable=False)
-    package_cache_key = Column(String, nullable=True)
 
 
 Base.metadata.create_all(bind=engine)
@@ -59,29 +67,71 @@ def hash_message_only(message_obj: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(message_obj).encode("utf-8")).hexdigest()
 
 
-def auth_guard(
-    authorization: Optional[str] = Header(default=None),
-    a2a_version: Optional[str] = Header(default=None, alias="A2A-Version"),
-    content_type: Optional[str] = Header(default=None),
-):
-    if a2a_version != "1.0":
-        raise HTTPException(status_code=400, detail={"code": "VERSION_NOT_SUPPORTED", "message": "A2A-Version must be 1.0"})
-    if authorization is None or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "Missing bearer token"})
-    token = authorization.removeprefix("Bearer ").strip()
-    if token != BEARER_TOKEN:
-        raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "Invalid bearer token"})
-    if content_type and "application/a2a+json" not in content_type:
-        raise HTTPException(status_code=400, detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"})
-    return token
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def require_a2a_headers(
+    authorization: Optional[str] = Header(default=None),
+    a2a_version: Optional[str] = Header(default=None, alias="A2A-Version"),
+    content_type: Optional[str] = Header(default=None, alias="Content-Type"),
+) -> str:
+    if a2a_version != "1.0":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VERSION_NOT_SUPPORTED", "message": "A2A-Version must be 1.0"}
+        )
+
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Missing bearer token"}
+        )
+
+    token = authorization.removeprefix("Bearer ").strip()
+    if token != BEARER_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
+        )
+
+    if content_type and "application/a2a+json" not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"}
+        )
+
+    return token
+
+
+def require_auth_only(
+    authorization: Optional[str] = Header(default=None),
+    a2a_version: Optional[str] = Header(default=None, alias="A2A-Version"),
+) -> str:
+    if a2a_version != "1.0":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VERSION_NOT_SUPPORTED", "message": "A2A-Version must be 1.0"}
+        )
+
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Missing bearer token"}
+        )
+
+    token = authorization.removeprefix("Bearer ").strip()
+    if token != BEARER_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
+        )
+
+    return token
 
 
 def build_agent_card() -> Dict[str, Any]:
@@ -92,14 +142,14 @@ def build_agent_card() -> Dict[str, Any]:
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,
-            "extendedAgentCard": False
+            "stateTransitionHistory": True
         },
         "skills": [
             {
                 "id": "invoice_action_agent",
                 "name": "invoice_action_agent",
                 "description": "Chooses one business action for each invoice package and returns evidence-backed proposals.",
-                "tags": ["invoice", "a2a", "reconciliation"]
+                "tags": ["invoice", "reconciliation", "a2a"]
             }
         ],
         "supportedInterfaces": [
@@ -124,7 +174,7 @@ def make_task_envelope(
     context_id: str,
     state: str,
     history: List[Dict[str, Any]],
-    artifacts: List[Dict[str, Any]]
+    artifacts: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     return {
         "id": task_id,
@@ -154,6 +204,9 @@ def fake_ai_decide_package(package: Dict[str, Any]) -> Dict[str, Any]:
     else:
         action = "settle_invoice"
 
+    refs = package.get("evidenceRefs") or ["[P1]", "[P2]", "[P3]"]
+    refs = refs[:3]
+
     facts = {
         "vendorName": package.get("vendorName", "Unknown Vendor"),
         "invoiceNumber": package.get("invoiceNumber", f"INV-{package_id[:6]}"),
@@ -161,32 +214,35 @@ def fake_ai_decide_package(package: Dict[str, Any]) -> Dict[str, Any]:
         "currency": package.get("currency", "INR")
     }
 
-    refs = package.get("evidenceRefs")
-    if not refs or len(refs) < 3:
-        refs = ["[P1]", "[P2]", "[P3]"]
-
-    refs = refs[:3]
-
-    rationale = (
-        f"Chosen action is {action}. Evidence {refs[0]} and {refs[1]} support the commercial status, "
-        f"and {refs[2]} is the decisive reference used to finalize the proposal."
-    )
-
     return {
         "packageId": package_id,
         "actionId": uuid.uuid4().hex[:12],
         "action": action,
         "facts": facts,
         "evidenceRefs": refs,
-        "rationale": rationale
+        "rationale": (
+            f"Chosen action is {action}. Evidence {refs[0]} and {refs[1]} support the commercial "
+            f"status, and {refs[2]} is the decisive reference used to finalize the proposal."
+        )
     }
 
 
 def get_task_or_404(db: Session, principal: str, task_id: str) -> TaskRecord:
-    row = db.query(TaskRecord).filter(TaskRecord.id == task_id, TaskRecord.principal == principal).first()
+    row = db.query(TaskRecord).filter(
+        TaskRecord.id == task_id,
+        TaskRecord.principal == principal
+    ).first()
     if not row:
-        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "message": "Task not found"})
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "TASK_NOT_FOUND", "message": "Task not found"}
+        )
     return row
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 @app.get("/.well-known/agent-card.json")
@@ -197,60 +253,67 @@ def agent_card():
 @app.post("/a2a/message:send")
 async def message_send(
     request: Request,
-    principal: str = Depends(auth_guard),
+    principal: str = Depends(require_a2a_headers),
     db: Session = Depends(get_db),
 ):
     body = await request.json()
 
-    if "message" not in body:
-        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "Missing message"})
+    message = body.get("message")
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "Missing message"}
+        )
 
-    message = body["message"]
-    configuration = body.get("configuration", {})
     message_id = message.get("messageId")
-    task_id = message.get("taskId")
-    context_id = message.get("contextId")
-
     if not message_id:
-        raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "messageId required"})
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_REQUEST", "message": "messageId required"}
+        )
 
     message_hash = hash_message_only(message)
 
     with task_lock:
-        existing_same_id = db.query(TaskRecord).filter(
+        existing = db.query(TaskRecord).filter(
             TaskRecord.principal == principal,
             TaskRecord.message_id == message_id
         ).first()
 
-        if existing_same_id:
-            if existing_same_id.message_hash != message_hash:
+        if existing:
+            if existing.message_hash != message_hash:
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "IDEMPOTENCY_CONFLICT", "message": "Same messageId, different message content"}
                 )
             return JSONResponse(
-                content={"task": json.loads(existing_same_id.task_json)},
+                content={"task": json.loads(existing.task_json)},
                 media_type="application/a2a+json"
             )
 
         parts = message.get("parts", [])
         if not parts:
-            raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "message.parts required"})
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "BAD_REQUEST", "message": "message.parts required"}
+            )
 
-        media_type = parts[0].get("mediaType")
+        part = parts[0]
+        media_type = part.get("mediaType")
 
-        # Initial batch submission
         if media_type == "application/vnd.ga5.invoice-claim-batch+json":
-            batch = parts[0].get("data", {})
-            batch_id = batch.get("batchId")
-            packages = batch.get("packages", [])
+            data = part.get("data", {})
+            batch_id = data.get("batchId")
+            packages = data.get("packages", [])
 
             if not batch_id or not isinstance(packages, list):
-                raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "Invalid batch payload"})
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "BAD_REQUEST", "message": "Invalid batch payload"}
+                )
 
-            new_task_id = str(uuid.uuid4())
-            new_context_id = str(uuid.uuid4())
-
+            task_id = str(uuid.uuid4())
+            context_id = str(uuid.uuid4())
             proposals = [fake_ai_decide_package(pkg) for pkg in packages]
 
             proposal_artifact = {
@@ -267,17 +330,17 @@ async def message_send(
             }
 
             task = make_task_envelope(
-                task_id=new_task_id,
-                context_id=new_context_id,
+                task_id=task_id,
+                context_id=context_id,
                 state="TASK_STATE_INPUT_REQUIRED",
                 history=[message],
                 artifacts=[proposal_artifact]
             )
 
             row = TaskRecord(
-                id=new_task_id,
+                id=task_id,
                 principal=principal,
-                context_id=new_context_id,
+                context_id=context_id,
                 batch_id=batch_id,
                 state="TASK_STATE_INPUT_REQUIRED",
                 task_json=canonical_json(task),
@@ -289,37 +352,59 @@ async def message_send(
 
             return JSONResponse(content={"task": task}, media_type="application/a2a+json")
 
-        # Result continuation
         if media_type == "application/vnd.ga5.invoice-action-results+json":
+            task_id = message.get("taskId")
+            context_id = message.get("contextId")
+
             if not task_id or not context_id:
-                raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "taskId and contextId required for continuation"})
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "BAD_REQUEST", "message": "taskId and contextId required"}
+                )
 
             row = get_task_or_404(db, principal, task_id)
             task = json.loads(row.task_json)
 
-            if task["status"]["state"] in {"TASK_STATE_COMPLETED", "TASK_STATE_CANCELED"}:
-                raise HTTPException(status_code=409, detail={"code": "TASK_TERMINAL", "message": "Task already terminal"})
-
             if row.context_id != context_id:
-                raise HTTPException(status_code=409, detail={"code": "CONTEXT_MISMATCH", "message": "Context mismatch"})
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "CONTEXT_MISMATCH", "message": "Context mismatch"}
+                )
 
-            data = parts[0].get("data", {})
+            if task["status"]["state"] in {"TASK_STATE_COMPLETED", "TASK_STATE_CANCELED"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "TASK_TERMINAL", "message": "Task already terminal"}
+                )
+
+            data = part.get("data", {})
             if data.get("batchId") != row.batch_id:
-                raise HTTPException(status_code=409, detail={"code": "BATCH_MISMATCH", "message": "Batch mismatch"})
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "BATCH_MISMATCH", "message": "Batch mismatch"}
+                )
 
-            proposal_part = task["artifacts"][0]["parts"][0]["data"]
-            proposal_index = {
+            proposals = task["artifacts"][0]["parts"][0]["data"]["proposals"]
+            proposal_map = {
                 (p["packageId"], p["actionId"], p["action"]): p
-                for p in proposal_part["proposals"]
+                for p in proposals
             }
 
             accepted_execs = []
             for result in data.get("results", []):
-                key = (result.get("packageId"), result.get("actionId"), result.get("action"))
-                if key not in proposal_index:
-                    raise HTTPException(status_code=409, detail={"code": "PROPOSAL_MISMATCH", "message": "Result does not match stored proposal"})
+                key = (
+                    result.get("packageId"),
+                    result.get("actionId"),
+                    result.get("action")
+                )
+                if key not in proposal_map:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "PROPOSAL_MISMATCH", "message": "Result does not match stored proposal"}
+                    )
+
                 if result.get("outcome") == "ACCEPTED":
-                    p = proposal_index[key]
+                    p = proposal_map[key]
                     accepted_execs.append({
                         "packageId": p["packageId"],
                         "actionId": p["actionId"],
@@ -357,13 +442,16 @@ async def message_send(
 
             return JSONResponse(content={"task": task}, media_type="application/a2a+json")
 
-        raise HTTPException(status_code=400, detail={"code": "BAD_MEDIA_TYPE", "message": "Unsupported message part mediaType"})
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_MEDIA_TYPE", "message": "Unsupported message part mediaType"}
+        )
 
 
 @app.get("/a2a/tasks/{task_id}")
 def get_task(
     task_id: str,
-    principal: str = Depends(auth_guard),
+    principal: str = Depends(require_auth_only),
     db: Session = Depends(get_db),
 ):
     row = get_task_or_404(db, principal, task_id)
@@ -372,7 +460,7 @@ def get_task(
 
 @app.get("/a2a/tasks")
 def list_tasks(
-    principal: str = Depends(auth_guard),
+    principal: str = Depends(require_auth_only),
     db: Session = Depends(get_db),
 ):
     rows = db.query(TaskRecord).filter(TaskRecord.principal == principal).all()
@@ -383,7 +471,7 @@ def list_tasks(
 @app.post("/a2a/tasks/{task_id}:cancel")
 def cancel_task(
     task_id: str,
-    principal: str = Depends(auth_guard),
+    principal: str = Depends(require_auth_only),
     db: Session = Depends(get_db),
 ):
     with task_lock:
@@ -391,7 +479,10 @@ def cancel_task(
         task = json.loads(row.task_json)
 
         if task["status"]["state"] in {"TASK_STATE_COMPLETED", "TASK_STATE_CANCELED"}:
-            raise HTTPException(status_code=409, detail={"code": "TASK_NOT_CANCELABLE", "message": "Task is terminal"})
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "TASK_NOT_CANCELABLE", "message": "Task is terminal"}
+            )
 
         task["status"] = {
             "state": "TASK_STATE_CANCELED",
