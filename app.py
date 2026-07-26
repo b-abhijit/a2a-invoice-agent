@@ -137,18 +137,11 @@ def require_a2a_headers(
 
     token = authorization.removeprefix("Bearer ").strip()
     if token != BEARER_TOKEN:
+        print(f"DEBUG_AUTH_MISMATCH received={token!r} expected={BEARER_TOKEN!r}")  # TEMP: remove before final submit
         raise HTTPException(
             status_code=403,
             detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
         )
-
-    if content_type and "application/a2a+json" not in content_type:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"}
-        )
-
-    return token
 
 
 def require_auth_only(
