@@ -149,6 +149,8 @@ def require_auth_only(
 
     return token
 
+from fastapi import Header, HTTPException
+
 def auth_guard(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
@@ -164,12 +166,13 @@ def auth_guard(
     token = None
 
     if authorization:
-        if authorization.startswith("Bearer "):
-            token = authorization.removeprefix("Bearer ").strip()
+        auth = authorization.strip()
+        if auth.startswith("Bearer "):
+            token = auth.removeprefix("Bearer ").strip()
         else:
-            token = authorization.strip()
+            token = auth
 
-    if not token and x_api_key:
+    if token is None and x_api_key:
         token = x_api_key.strip()
 
     if not token:
@@ -192,7 +195,6 @@ def auth_guard(
 
     return token
 
-
 def build_agent_card() -> Dict[str, Any]:
     return {
         "name": "Invoice Action Agent",
@@ -211,9 +213,7 @@ def build_agent_card() -> Dict[str, Any]:
             }
         },
         "security": [
-            {
-                "apiKeyAuth": []
-            }
+            {"apiKeyAuth": []}
         ],
         "skills": [
             {
@@ -238,7 +238,6 @@ def build_agent_card() -> Dict[str, Any]:
             "application/vnd.ga5.invoice-action-receipts+json"
         ]
     }
-
 
 def make_task_envelope(
     task_id: str,
