@@ -161,30 +161,24 @@ def auth_guard(
         )
 
     authorization = request.headers.get("authorization")
-    x_api_key = request.headers.get("x-api-key")
-
-    token = None
-
-    if authorization:
-        auth = authorization.strip()
-        if auth.lower().startswith("bearer "):
-            token = auth[7:].strip()
-        else:
-            token = auth
-
-    if not token and x_api_key:
-        token = x_api_key.strip()
-
-    if not token:
+    if not authorization:
         raise HTTPException(
             status_code=401,
-            detail={"code": "UNAUTHORIZED", "message": "Missing auth token"}
+            detail={"code": "UNAUTHORIZED", "message": "Missing Authorization header"}
         )
 
+    auth = authorization.strip()
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Authorization must use Bearer token"}
+        )
+
+    token = auth[7:].strip()
     if token != BEARER_TOKEN:
         raise HTTPException(
             status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Invalid auth token"}
+            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
         )
 
     if content_type and "application/a2a+json" not in content_type:
@@ -206,14 +200,13 @@ def build_agent_card() -> Dict[str, Any]:
             "stateTransitionHistory": True
         },
         "securitySchemes": {
-            "apiKeyAuth": {
-                "type": "apiKey",
-                "in": "header",
-                "name": "X-API-Key"
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer"
             }
         },
         "security": [
-            {"apiKeyAuth": []}
+            {"bearerAuth": []}
         ],
         "skills": [
             {
