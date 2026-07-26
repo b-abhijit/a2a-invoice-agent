@@ -149,6 +149,49 @@ def require_auth_only(
 
     return token
 
+def auth_guard(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    a2a_version: Optional[str] = Header(default=None, alias="A2A-Version"),
+    content_type: Optional[str] = Header(default=None),
+):
+    if a2a_version != "1.0":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VERSION_NOT_SUPPORTED", "message": "A2A-Version must be 1.0"}
+        )
+
+    token = None
+
+    if authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization.removeprefix("Bearer ").strip()
+        else:
+            token = authorization.strip()
+
+    if not token and x_api_key:
+        token = x_api_key.strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Missing auth token"}
+        )
+
+    if token != BEARER_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Invalid auth token"}
+        )
+
+    if content_type and "application/a2a+json" not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"}
+        )
+
+    return token
+
 
 def build_agent_card() -> Dict[str, Any]:
     return {
@@ -161,14 +204,15 @@ def build_agent_card() -> Dict[str, Any]:
             "stateTransitionHistory": True
         },
         "securitySchemes": {
-            "bearerAuth": {
-                "type": "http",
-                "scheme": "bearer"
+            "apiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key"
             }
         },
         "security": [
             {
-                "bearerAuth": []
+                "apiKeyAuth": []
             }
         ],
         "skills": [
