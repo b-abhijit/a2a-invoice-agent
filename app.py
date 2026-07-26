@@ -18,7 +18,6 @@ from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
-BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 ORIGIN = os.getenv("ORIGIN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -41,7 +40,6 @@ ALLOWED_ACTIONS = {
 }
 
 missing = [name for name, value in {
-    "BEARER_TOKEN": BEARER_TOKEN,
     "BASE_URL": BASE_URL,
     "ORIGIN": ORIGIN,
     "DATABASE_URL": DATABASE_URL,
@@ -135,13 +133,24 @@ def require_a2a_headers(
             detail={"code": "UNAUTHORIZED", "message": "Missing bearer token"}
         )
 
+    # The Bearer token itself IS the caller's identity ("principal") for this
+    # protocol -- every distinct token is a distinct user (see spec section 4).
+    # There is no single shared secret to compare against; we only require that
+    # a non-empty bearer credential was presented.
     token = authorization.removeprefix("Bearer ").strip()
-    if token != BEARER_TOKEN:
-        print(f"DEBUG_AUTH_MISMATCH received={token!r} expected={BEARER_TOKEN!r}")  # TEMP: remove before final submit
+    if not token:
         raise HTTPException(
-            status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Empty bearer token"}
         )
+
+    if content_type and "application/a2a+json" not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"}
+        )
+
+    return token
 
 
 def require_auth_only(
@@ -161,10 +170,10 @@ def require_auth_only(
         )
 
     token = authorization.removeprefix("Bearer ").strip()
-    if token != BEARER_TOKEN:
+    if not token:
         raise HTTPException(
-            status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Empty bearer token"}
         )
 
     return token
@@ -195,10 +204,10 @@ def auth_guard(
         )
 
     token = auth[7:].strip()
-    if token != BEARER_TOKEN:
+    if not token:
         raise HTTPException(
-            status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Invalid bearer token"}
+            status_code=401,
+            detail={"code": "UNAUTHORIZED", "message": "Empty bearer token"}
         )
 
     if content_type and "application/a2a+json" not in content_type:
