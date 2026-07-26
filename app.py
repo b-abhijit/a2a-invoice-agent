@@ -35,8 +35,16 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-app = FastAPI(title="A2A Invoice Agent")
+app = FastAPI(title="A2A Invoice Agent", redirect_slashes=False)
 
+@app.get("/")
+def root():
+    return {"ok": True, "service": "a2a-invoice-agent"}
+
+@app.get("/.well-known/agent-card.json")
+def agent_card():
+    return JSONResponse(content=build_agent_card(), media_type="application/json")
+    
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
