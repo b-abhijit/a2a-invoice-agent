@@ -44,7 +44,7 @@ def root():
 @app.get("/.well-known/agent-card.json")
 def agent_card():
     return JSONResponse(content=build_agent_card(), media_type="application/json")
-    
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
@@ -160,6 +160,17 @@ def build_agent_card() -> Dict[str, Any]:
             "pushNotifications": False,
             "stateTransitionHistory": True
         },
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer"
+            }
+        },
+        "security": [
+            {
+                "bearerAuth": []
+            }
+        ],
         "skills": [
             {
                 "id": "invoice_action_agent",
