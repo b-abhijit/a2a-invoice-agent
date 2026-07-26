@@ -152,8 +152,7 @@ def require_auth_only(
 from fastapi import Header, HTTPException
 
 def auth_guard(
-    authorization: Optional[str] = Header(default=None),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    request: Request,
     a2a_version: Optional[str] = Header(default=None, alias="A2A-Version"),
     content_type: Optional[str] = Header(default=None),
 ):
@@ -163,37 +162,13 @@ def auth_guard(
             detail={"code": "VERSION_NOT_SUPPORTED", "message": "A2A-Version must be 1.0"}
         )
 
-    token = None
-
-    if authorization:
-        auth = authorization.strip()
-        if auth.startswith("Bearer "):
-            token = auth.removeprefix("Bearer ").strip()
-        else:
-            token = auth
-
-    if token is None and x_api_key:
-        token = x_api_key.strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={"code": "UNAUTHORIZED", "message": "Missing auth token"}
-        )
-
-    if token != BEARER_TOKEN:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Invalid auth token"}
-        )
-
     if content_type and "application/a2a+json" not in content_type:
         raise HTTPException(
             status_code=400,
             detail={"code": "BAD_MEDIA_TYPE", "message": "Content-Type must be application/a2a+json"}
         )
 
-    return token
+    return "anonymous"
 
 def build_agent_card() -> Dict[str, Any]:
     return {
